@@ -5,6 +5,7 @@
 #include <string>
 #include <unistd.h>   //fork(), execve(), pipe(), dup2(), close(), write()
 #include <sys/wait.h> //waitpid(), WIFSIGNALED, WTERMSIG
+#include <fcntl.h>
 
 // Ejecuta el programa en target_path pasándolen input como si se lo hubieran
 // tecleado por stdin. Devuelve true si el proceso murió por una señal (crash).
@@ -40,20 +41,25 @@ bool run_target(const std::string &target_path, const std::string &input)
         dup2(pipe_fds[0], STDIN_FILENO);
         close(pipe_fds[0]); // cierro lectura
 
+        // Redirigimos la salida del hijo a /dev/null Así, las miles de
+        // veces que el target imprima o ASan vuelque su informe, no se
+        // llena la terminal. La señal de crash se detecta igual.
+        // open() devuelve un descriptor de archivo; O_WRONLY = solo escritura.
+        int devnull = open("/dev/null", O_WRONLY);
+        dup2(devnull, STDOUT_FILENO); // salida normal (cout)
+        dup2(devnull, STDERR_FILENO); // salida de errores (cerr y ASan)
+        close(devnull);
+
         // execve() sustituye el proceso actual por otro programa distinto.
         // El hijo se convierte en target_path
         // target_path.c_str(): Ruta del ejecutable
         // args[0]: nombre del programa, args[1]: terminado en nullptr
         // nullptr: variables del entorno del nuevo programa
-
         char *args[] = {const_cast<char *>(target_path.c_str()), nullptr};
-        // NO SIRVE
-        // execve(target_path.c_str(), args, nullptr);
 
         char *envp[] = {
-            const_cast<char *>("ASAN_OPTIONS=abort_on_error=1"),
-            nullptr // igual que con args[], la lista de entorno también termina en nullptr
-        };
+            const_cast<char *>("ASAN_OPTIONS=abort_on_error=0:exitcode=86:symbolize=0:detect_leaks=0"),
+            nullptr};
 
         execve(target_path.c_str(), args, envp);
         std::cerr << "Error en execve(): " << strerror(errno) << std::endl;
@@ -75,23 +81,13 @@ bool run_target(const std::string &target_path, const std::string &input)
     // WIFSIGNALED(status) verdadero si proceso murió por una señal (crash)
     if (WIFSIGNALED(status))
     {
-        std::cout << "CRASH detectado. Senal: " << WTERMSIG(status) << std::endl;
+        return true;
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 86)
+    {
         return true;
     }
 
     return false; // termina normal
-}
-
-int main()
-{
-    std::string target = "targets/bug1";
-
-    std::cout << "--- Probando con input seguro ---" << std::endl;
-    run_target(target, "hola\n");
-
-    std::cout << "--- Probando con input largo (deberia crashear) ---" << std::endl;
-    std::string long_input(100, 'A'); // crea un string de 100 caracteres A seguidos
-    run_target(target, long_input + "\n");
-
-    return 0;
 }
